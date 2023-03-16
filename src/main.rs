@@ -33,6 +33,7 @@ unsafe fn open_with_local(path: &str) {
                         .expect("get video information failed"),
                 );
                 vid_stream = i as usize;
+                println!("id:{}", vid_stream);
             }
             Type::Audio => {
                 audio_decoder = Some(
@@ -98,7 +99,7 @@ unsafe fn decode_video_frame(
         if res.is_err() {
             break;
         } else {
-            println!("frame is empty? {}", frame.is_empty());
+            // println!("frame is empty? {}", frame.is_empty());
             enqueue(&frame);
         }
     }
@@ -131,7 +132,8 @@ fn enqueue(frame: &Frame) {
         frame.quality(),
         frame.flags(),
         frame.metadata(),
-    )
+    );
+    panic!("asdf");
 }
 
 unsafe fn open_with_web(path: &str) {
