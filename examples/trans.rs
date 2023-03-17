@@ -1,12 +1,13 @@
 extern crate ffmpeg_next;
 
 use ffmpeg_next::codec::encoder::Encoder;
+use ffmpeg_next::codec::parameters;
 use ffmpeg_next::format::context::output::Output;
 use ffmpeg_next::frame::Video;
 use ffmpeg_next::media::Type;
 use ffmpeg_next::util::format::pixel::Pixel;
 use ffmpeg_next::util::frame::video::Video as VideoFrame;
-use ffmpeg_next::{codec, encoder, format, Frame, Packet};
+use ffmpeg_next::{codec, dictionary, encoder, format, Frame, Packet};
 use std::env;
 use std::path::Path;
 
@@ -22,7 +23,11 @@ fn main() {
     let output_url = &args[2];
 
     // Open input file using FFmpeg
-    let mut input_format_context = format::input(&input_path).expect("Failed to open input file");
+    let mut options = dictionary::Owned::new();
+    // options.set("rtsp_transport", "tcp");
+    // options.set("max_delay", "550");
+    let mut input_format_context =
+        format::input_with_dictionary(&input_path, options).expect("Failed to open input file");
 
     for i in 0..input_format_context.nb_streams() {
         let stream = input_format_context.stream(i as usize).unwrap();
@@ -37,9 +42,7 @@ fn main() {
                     .decoder()
                     .video()
                     .expect("Failed to find video decoder");
-
                 // Open output URL using FFmpeg
-                // let mut output_format_context = format::output(output_url).expect("Failed to open output URL");
                 let mut output_format_context =
                     format::output_as(output_url, "flv").expect("Failed to open output URL");
 
@@ -57,9 +60,14 @@ fn main() {
                 output_video_encoder.set_height(input_video_decoder.height());
                 output_video_encoder.set_format(Pixel::YUV420P);
                 output_video_encoder.set_frame_rate(input_video_decoder.frame_rate());
-
-                let mut output_video_encoder = output_video_encoder.open().unwrap();
-
+                let mut options = dictionary::Owned::new();
+                // options.set("profile", "high");
+                // options.set("level", "4.2");
+                // options.set("preset", "slow");
+                // options.set("crf", "22");
+                let mut output_video_encoder = output_video_encoder
+                    .open_as_with(output_codec, options)
+                    .unwrap();
                 // Write header to output URL
                 output_format_context
                     .write_header()
@@ -101,14 +109,14 @@ fn main() {
                                     //     input_frame.flags(),
                                     //     input_frame.metadata(),
                                     // );
-                                    output_frame.set_pts(Some(frame_number));
+                                    // output_frame.set_pts(Some(frame_number));
                                     output_video_encoder
                                         .send_frame(&input_frame)
                                         .expect("Failed to send input_frame");
                                     let mut out_packet = Packet::empty();
                                     match output_video_encoder.receive_packet(&mut out_packet) {
                                         Ok(()) => {
-                                            println!("size:{}", out_packet.size());
+                                            // println!("size:{}", out_packet.size());
                                             out_packet
                                                 .set_stream(video_stream_index.try_into().unwrap());
                                             out_packet

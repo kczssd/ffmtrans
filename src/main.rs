@@ -1,164 +1,129 @@
-use ffmpeg_next::codec::decoder;
-use ffmpeg_next::format::context::Input as CtInput;
-use ffmpeg_next::format::Input;
+extern crate ffmpeg_next;
+
+use ffmpeg_next::codec::{parameters, Context};
+use ffmpeg_next::format::context::{input, output};
+use ffmpeg_next::frame::Video;
 use ffmpeg_next::media::Type;
-use ffmpeg_next::{codec, dictionary, format, Error};
-use ffmpeg_next::{Format, Frame, Packet};
-use ffmpeg_sys_next::AVInputFormat;
-use std::ptr;
-
-unsafe fn open_with_local(path: &str) {
-    let ptr: *mut AVInputFormat = ptr::null_mut();
-    let open_format = Format::Input(Input::wrap(ptr));
-    // 封装器上下文
-    let mut input = format::open(&path, &open_format)
-        .expect("open error")
-        .input();
-    // decoder
-    let mut video_decoder: Option<decoder::Video> = None;
-    let mut audio_decoder: Option<decoder::Audio> = None;
-    // stream_id
-    let mut vid_stream: usize = 0;
-    let mut aud_stream: usize = 0;
-    for i in 0..input.nb_streams() {
-        let stream = input.stream(i as usize).expect("can't find stream");
-        let media_type = stream.codec().medium();
-        match media_type {
-            Type::Video => {
-                video_decoder = Some(
-                    stream
-                        .codec()
-                        .decoder()
-                        .video()
-                        .expect("get video information failed"),
-                );
-                vid_stream = i as usize;
-                println!("id:{}", vid_stream);
-            }
-            Type::Audio => {
-                audio_decoder = Some(
-                    stream
-                        .codec()
-                        .decoder()
-                        .audio()
-                        .expect("get audio information failed"),
-                );
-                aud_stream = i as usize;
-            }
-            _ => {
-                println!("unhandled media_type {:?}", media_type);
-            }
-        }
-    }
-    if video_decoder.is_some() && audio_decoder.is_some() {
-        read_frame(
-            &mut input,
-            &mut video_decoder.unwrap(),
-            &mut audio_decoder.unwrap(),
-            vid_stream,
-            aud_stream,
-        );
-    }
-}
-
-unsafe fn read_frame(
-    mut input: &mut CtInput,
-    video_decoder: &mut decoder::Video,
-    audio_decoder: &mut decoder::Audio,
-    vid_stream: usize,
-    aud_stream: usize,
-) {
-    loop {
-        let mut packet = Packet::empty();
-        let res = packet.read(&mut input);
-        if res.is_err() {
-            break;
-        }
-        if packet.stream() == vid_stream {
-            let mut frame = Frame::empty();
-            decode_video_frame(video_decoder, &packet, frame).expect("decode video frame failed");
-        }
-        // else if packet.stream() == aud_stream {
-        //     let mut frame = Frame::empty();
-        //     decode_audio_frame(audio_decoder, &packet, &mut frame)
-        //         .expect("decode video frame failed");
-        //     enqueue(frame);
-        // }
-    }
-}
-unsafe fn decode_video_frame(
-    decoder: &mut decoder::Video,
-    packet: &Packet,
-    mut frame: Frame,
-) -> Result<(), Error> {
-    decoder
-        .send_packet(packet)
-        .expect("send video frame failed");
-    loop {
-        let res = decoder.receive_frame(&mut frame);
-        if res.is_err() {
-            break;
-        } else {
-            // println!("frame is empty? {}", frame.is_empty());
-            enqueue(&frame);
-        }
-    }
-    Ok(())
-}
-fn decode_audio_frame(
-    decoder: &mut decoder::Audio,
-    packet: &Packet,
-    frame: &mut Frame,
-) -> Result<(), Error> {
-    decoder
-        .send_packet(packet)
-        .expect("send audio frame failed");
-    loop {
-        let res = decoder.receive_frame(frame);
-        if res.is_err() {
-            break;
-        }
-    }
-    Ok(())
-}
-fn enqueue(frame: &Frame) {
-    // TODO:enqueue
-    println!(
-        "iskey:{} iscorrupt:{} pts:{:?} timestamp:{:?} quality:{} flags:{:?} metadata:{:?}",
-        frame.is_key(),
-        frame.is_corrupt(),
-        frame.pts(),
-        frame.timestamp(),
-        frame.quality(),
-        frame.flags(),
-        frame.metadata(),
-    );
-    panic!("asdf");
-}
-
-unsafe fn open_with_web(path: &str) {
-    format::network::init();
-    let ptr: *mut AVInputFormat = ptr::null_mut();
-    let open_format = Format::Input(Input::wrap(ptr));
-    let mut options = dictionary::Owned::new();
-    options.set("rtsp_transport", "tcp");
-    options.set("max_delay", "550");
-    let context = format::open_with(&path, &open_format, options)
-        .expect("open error")
-        .input();
-    // video information
-    let duration: f32 = context.duration() as f32 / 1000000.0;
-    println!("duration:{duration}s");
-    for meta in context.metadata().iter() {
-        println!("{} {}", meta.0, meta.1);
-    }
-}
+use ffmpeg_next::packet::Mut;
+use ffmpeg_next::time::{self, current};
+use ffmpeg_next::util::format::pixel::Pixel;
+use ffmpeg_next::{codec, dictionary, format, util, Packet, Rational, Rescale, Rounding, Stream};
+use ffmpeg_sys_next::{
+    av_free_packet, av_gettime, av_q2d, av_rescale_q, av_usleep, avcodec_copy_context,
+    AV_NOPTS_VALUE, AV_TIME_BASE,
+};
+use std::env;
+use std::path::Path;
 
 fn main() {
-    // println!("{}", codec::configuration());
-    unsafe {
-        // format::register_all();
-        open_with_local("testmv.mp4");
-        // open_with_web("rtsp://localhost:8554/stream");
+    // register
+    format::register_all();
+    format::network::init();
+    // params
+    let mut video_stream_index = 0;
+    let mut frame_index = 0;
+    // Parse command line arguments
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 3 {
+        panic!("Usage: ./mp4_to_rtmp <filename.mp4> <rtmp://stream-url>");
     }
+    let input_path = Path::new(&args[1]);
+    let output_url = &args[2];
+
+    // Open input file using FFmpeg
+    let mut options = dictionary::Owned::new();
+    let mut input_format_context =
+        format::input_with_dictionary(&input_path, options).expect("Failed to open input file"); // AVFormatContext
+
+    for i in 0..input_format_context.nb_streams() {
+        let stream = input_format_context.stream(i as usize).unwrap();
+        match stream.codec().medium() {
+            Type::Video => {
+                // Find video stream in the input file
+                video_stream_index = i;
+                break;
+            }
+            Type::Audio => {}
+            _ => {}
+        }
+    }
+    input::dump(&input_format_context, 0, input_path.to_str());
+
+    // Open output URL using FFmpeg
+    let mut output_format_context =
+        format::output_as(output_url, "flv").expect("Failed to open output URL"); // AVFormatContext
+    let output_format = output_format_context.format(); // AVOutputFormat
+
+    unsafe {
+        for i in 0..input_format_context.nb_streams() {
+            let input_stream = input_format_context.stream(i as usize).unwrap(); // stream.codec() => AVCodecContext
+            let output_stream = output_format_context
+                .add_stream(input_stream.codec().codec()) // stream.codec().codec() => AVCodec
+                .expect("Failed add output stream");
+            output_stream.codec().clone_from(&input_stream.codec()); // avcodec_copy_context
+            (*output_stream.codec().as_mut_ptr()).codec_tag = 0;
+        }
+    }
+    output::dump(&output_format_context, 0, Some(&output_url));
+
+    // write file header
+    output_format_context
+        .write_header()
+        .expect("Failed to write output header");
+    println!("asdf");
+    let start_time = current();
+    loop {
+        let mut packet = Packet::empty();
+        match packet.read(&mut input_format_context) {
+            Ok(_) => {}
+            Err(_) => break,
+        };
+        // pts dts duration
+        // delay
+        if packet.stream() == video_stream_index as usize {
+            let time_base = input_format_context
+                .stream(video_stream_index as usize)
+                .unwrap()
+                .time_base();
+            let time_base_q = Rational::new(1, AV_TIME_BASE);
+            let pts_time = packet.dts().unwrap().rescale(time_base, time_base_q);
+            let now_time = current() - start_time;
+            if pts_time > now_time {
+                time::sleep((pts_time - now_time) as u32).expect("Failed to sleep");
+            }
+        }
+        let in_stream = input_format_context.stream(packet.stream()).unwrap();
+        let out_stream = output_format_context.stream(packet.stream()).unwrap();
+        // copy packet
+        packet.set_pts(Some(packet.pts().unwrap().rescale_with(
+            in_stream.time_base(),
+            out_stream.time_base(),
+            Rounding::NearInfinity,
+        )));
+        packet.set_dts(Some(packet.dts().unwrap().rescale_with(
+            in_stream.time_base(),
+            out_stream.time_base(),
+            Rounding::NearInfinity,
+        )));
+        packet.set_duration(packet.duration().rescale_with(
+            in_stream.time_base(),
+            out_stream.time_base(),
+            Rounding::NearInfinity,
+        ));
+        packet.set_position(-1);
+        if packet.stream() == video_stream_index as usize {
+            println!("Send {} video frames to output URL\n", frame_index);
+            frame_index += 1;
+        }
+        match packet.write(&mut output_format_context) {
+            Ok(_) => {}
+            Err(_) => break,
+        };
+        unsafe {
+            av_free_packet(packet.as_mut_ptr());
+        }
+    }
+    output_format_context
+        .write_trailer()
+        .expect("Failed to write output trailer");
 }
