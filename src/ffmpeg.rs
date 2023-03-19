@@ -4,12 +4,13 @@ use ffmpeg_next::{
         self,
         context::{input, output, Input, Output},
     },
+    frame::Video,
     media::Type,
     packet::Mut,
     time::{self, current},
-    Packet, Rational, Rescale, Rounding,
+    Frame, Packet, Rational, Rescale, Rounding,
 };
-use ffmpeg_sys_next::{av_free_packet, AV_TIME_BASE};
+use ffmpeg_sys_next::{av_free_packet, av_q2d, AV_NOPTS_VALUE, AV_TIME_BASE};
 use std::path::Path;
 
 pub struct FFmpeg<'a> {
@@ -68,7 +69,6 @@ impl<'a> FFmpeg<'a> {
                 Some(format::output_as(&self.out_path, fmt).expect("Failed to open output URL"))
             }
         };
-
         let out_f_ctx_mut = self.out_f_ctx.as_mut().unwrap();
         let in_f_ctx = self.in_f_ctx.as_ref().unwrap();
 
@@ -86,10 +86,12 @@ impl<'a> FFmpeg<'a> {
     }
 
     fn write_header(&mut self) {
+        let mut options = Owned::new();
+        options.set("flvflags", "no_duration_filesize");
         self.out_f_ctx
             .as_mut()
             .unwrap()
-            .write_header()
+            .write_header_with(options)
             .expect("Failed to write output header");
     }
     fn write_trailer(&mut self) {
@@ -106,7 +108,7 @@ impl<'a> FFmpeg<'a> {
 
         let mut frame_idx = 0;
         let start_time = current();
-
+        let mut old_dts: Option<i64> = None;
         loop {
             let mut packet = Packet::empty();
             match packet.read(&mut self.in_f_ctx.as_mut().unwrap()) {
@@ -114,6 +116,27 @@ impl<'a> FFmpeg<'a> {
                 Err(_) => break,
             };
             // pts dts duration
+            if packet.pts().is_none() || packet.dts().is_none() {
+                //Write PTS
+                let stream = self
+                    .in_f_ctx
+                    .as_ref()
+                    .unwrap()
+                    .stream(self.stream_id.0 as usize)
+                    .unwrap();
+                let time_base = stream.time_base();
+                //Duration between 2 frames (us)
+                let duration = AV_TIME_BASE as i64 / f64::from(stream.rate()) as i64;
+                //Parameters
+                packet.set_pts(Some(
+                    ((frame_idx * duration) as f64 / (f64::from(time_base) * AV_TIME_BASE as f64))
+                        as i64,
+                ));
+                packet.set_dts(packet.pts());
+                packet.set_duration(
+                    (duration as f64 / (f64::from(time_base) * AV_TIME_BASE as f64)) as i64,
+                )
+            }
             // delay
             if packet.stream() == self.stream_id.0 as usize {
                 let time_base = self
@@ -159,6 +182,12 @@ impl<'a> FFmpeg<'a> {
                 Rounding::NearInfinity,
             ));
             packet.set_position(-1);
+            if old_dts.is_some() && old_dts.unwrap() > packet.dts().unwrap() {
+                packet.set_pts(Some(old_dts.unwrap() + packet.duration()));
+                packet.set_dts(packet.pts());
+            }
+            // handle error frame dts
+            old_dts = packet.dts();
             if packet.stream() == self.stream_id.0 as usize {
                 println!("Send {} video frames to output URL\n", frame_idx);
                 frame_idx += 1;
