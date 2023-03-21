@@ -22,9 +22,6 @@ fn main() {
     let mut options = Owned::new();
     options.set("rtsp_transport", "tcp");
     options.set("max_delay", "550000");
-    // options.set("stimeout", "500000");
-    // options.set("buffer_size", "4096000");
-    // options.set("probesize", "9000000");
     ffmpeg.in_open(Some(options));
 
     // Open output URL using FFmpeg

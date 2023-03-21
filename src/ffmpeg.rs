@@ -4,13 +4,12 @@ use ffmpeg_next::{
         self,
         context::{input, output, Input, Output},
     },
-    frame::Video,
     media::Type,
     packet::Mut,
     time::{self, current},
-    Frame, Packet, Rational, Rescale, Rounding,
+    Packet, Rational, Rescale, Rounding,
 };
-use ffmpeg_sys_next::{av_free_packet, av_q2d, AV_NOPTS_VALUE, AV_TIME_BASE};
+use ffmpeg_sys_next::{av_free_packet, AV_TIME_BASE};
 use std::path::Path;
 
 pub struct FFmpeg<'a> {
@@ -20,6 +19,7 @@ pub struct FFmpeg<'a> {
     pub out_f_ctx: Option<Output>, // AVFormatContext
     stream_id: (i32, i32),
 }
+
 impl<'a> FFmpeg<'a> {
     pub fn init(in_path: &'a Path, out_path: &'a Path) -> Self {
         // register & network_init
@@ -82,7 +82,7 @@ impl<'a> FFmpeg<'a> {
                 (*output_stream.codec().as_mut_ptr()).codec_tag = 0;
             }
         }
-        output::dump(self.out_f_ctx.as_ref().unwrap(), 0, self.out_path.to_str());
+        output::dump(out_f_ctx_mut, 0, self.out_path.to_str());
     }
 
     fn write_header(&mut self) {
@@ -109,21 +109,20 @@ impl<'a> FFmpeg<'a> {
         let mut frame_idx = 0;
         let start_time = current();
         let mut old_dts: Option<i64> = None;
+
+        let mut in_f_ctx_mut = self.in_f_ctx.as_mut().unwrap();
+        let mut out_f_ctx_mut = self.out_f_ctx.as_mut().unwrap();
+
         loop {
             let mut packet = Packet::empty();
-            match packet.read(&mut self.in_f_ctx.as_mut().unwrap()) {
+            match packet.read(&mut in_f_ctx_mut) {
                 Ok(_) => {}
                 Err(_) => break,
             };
             // pts dts duration
             if packet.pts().is_none() || packet.dts().is_none() {
                 //Write PTS
-                let stream = self
-                    .in_f_ctx
-                    .as_ref()
-                    .unwrap()
-                    .stream(self.stream_id.0 as usize)
-                    .unwrap();
+                let stream = in_f_ctx_mut.stream(self.stream_id.0 as usize).unwrap();
                 let time_base = stream.time_base();
                 //Duration between 2 frames (us)
                 let duration = AV_TIME_BASE as i64 / f64::from(stream.rate()) as i64;
@@ -139,10 +138,7 @@ impl<'a> FFmpeg<'a> {
             }
             // delay
             if packet.stream() == self.stream_id.0 as usize {
-                let time_base = self
-                    .in_f_ctx
-                    .as_ref()
-                    .unwrap()
+                let time_base = in_f_ctx_mut
                     .stream(self.stream_id.0 as usize)
                     .unwrap()
                     .time_base();
@@ -153,18 +149,8 @@ impl<'a> FFmpeg<'a> {
                     time::sleep((pts_time - now_time) as u32).expect("Failed to sleep");
                 }
             }
-            let in_stream = self
-                .in_f_ctx
-                .as_ref()
-                .unwrap()
-                .stream(packet.stream())
-                .unwrap();
-            let out_stream = self
-                .out_f_ctx
-                .as_ref()
-                .unwrap()
-                .stream(packet.stream())
-                .unwrap();
+            let in_stream = in_f_ctx_mut.stream(packet.stream()).unwrap();
+            let out_stream = out_f_ctx_mut.stream(packet.stream()).unwrap();
             // copy packet
             packet.set_pts(Some(packet.pts().unwrap().rescale_with(
                 in_stream.time_base(),
@@ -192,7 +178,7 @@ impl<'a> FFmpeg<'a> {
                 println!("Send {} video frames to output URL\n", frame_idx);
                 frame_idx += 1;
             }
-            match packet.write(&mut self.out_f_ctx.as_mut().unwrap()) {
+            match packet.write(&mut out_f_ctx_mut) {
                 Ok(_) => {}
                 Err(_) => break,
             };
