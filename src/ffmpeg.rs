@@ -1,3 +1,6 @@
+use ffmpeg_next::format::Pixel;
+use ffmpeg_next::frame::Video;
+use ffmpeg_next::{codec, Frame};
 use ffmpeg_next::{
     dictionary::Owned,
     format::{
@@ -5,11 +8,10 @@ use ffmpeg_next::{
         context::{input, output, Input, Output},
     },
     media::Type,
-    packet::Mut,
     time::{self, current},
     Packet, Rational, Rescale, Rounding,
 };
-use ffmpeg_sys_next::{av_free_packet, AV_TIME_BASE};
+use ffmpeg_sys_next::AV_TIME_BASE;
 use std::path::Path;
 
 pub struct FFmpeg<'a> {
@@ -18,6 +20,7 @@ pub struct FFmpeg<'a> {
     pub in_f_ctx: Option<Input>,   // AVFormatContext
     pub out_f_ctx: Option<Output>, // AVFormatContext
     stream_id: (i32, i32),
+    frame_que: Vec<Video>,
 }
 
 impl<'a> FFmpeg<'a> {
@@ -31,6 +34,7 @@ impl<'a> FFmpeg<'a> {
             in_f_ctx: None,
             stream_id: (-1, -1),
             out_f_ctx: None,
+            frame_que: vec![],
         }
     }
 
@@ -85,24 +89,100 @@ impl<'a> FFmpeg<'a> {
         output::dump(out_f_ctx_mut, 0, self.out_path.to_str());
     }
 
-    fn write_header(&mut self) {
-        let mut options = Owned::new();
-        options.set("flvflags", "no_duration_filesize");
-        self.out_f_ctx
+    pub fn decoder(&mut self) {
+        // open decoder
+        let in_codec_ctx = self
+            .in_f_ctx
             .as_mut()
             .unwrap()
-            .write_header_with(options)
-            .expect("Failed to write output header");
+            .stream(self.stream_id.0 as usize)
+            .unwrap()
+            .codec(); // AVCodecContext
+        let in_codec = codec::decoder::find(in_codec_ctx.id()).expect("Failed to find codec"); // AVCodec
+        let mut in_opened = in_codec_ctx
+            .decoder()
+            .open_as(in_codec)
+            .expect("Failed to open codec");
+
+        // frame&packet
+        // input::dump(in_f_ctx_mut, 0, self.in_path.to_str());
+
+        loop {
+            let mut packet = Packet::empty(); // AVPacket
+            let mut vid_frame = Video::empty(); // AVFrame
+            match packet.read(self.in_f_ctx.as_mut().unwrap()) {
+                Ok(_) => {}
+                Err(_) => break,
+            };
+            // video packet
+            if packet.stream() == self.stream_id.0 as usize {
+                in_opened
+                    .send_packet(&packet)
+                    .expect("Failed to send packet");
+                in_opened
+                    .receive_frame(&mut vid_frame)
+                    .expect("Failed to receive frame");
+                self.enqueue(vid_frame);
+            }
+        }
     }
-    fn write_trailer(&mut self) {
-        self.out_f_ctx
+    pub fn encoder(&mut self) {
+        // output_stream 如果不clone_from 需要单独设置
+        // open encoder
+        let out_codec_ctx = self
+            .out_f_ctx
             .as_mut()
             .unwrap()
-            .write_trailer()
-            .expect("Failed to write output trailer");
+            .stream(self.stream_id.0 as usize)
+            .unwrap()
+            .codec(); // AVCodecContext
+
+        let out_codec = codec::encoder::find(out_codec_ctx.id()).expect("Failed to find codec"); // AVCodec
+        let mut options = Owned::new();
+        options.set("preset", "slow");
+        options.set("tune", "zerolatency");
+        let mut out_encoder = out_codec_ctx.encoder().video().unwrap();
+        // configure
+        let decoder = self
+            .in_f_ctx
+            .as_ref()
+            .unwrap()
+            .stream(self.stream_id.0 as usize)
+            .unwrap()
+            .codec()
+            .decoder()
+            .video()
+            .unwrap();
+        out_encoder.set_format(Pixel::YUV420P);
+        out_encoder.set_frame_rate(decoder.frame_rate());
+        out_encoder.set_width(decoder.width());
+        out_encoder.set_height(decoder.height());
+        out_encoder.set_time_base(decoder.time_base());
+        out_encoder.set_bit_rate(decoder.bit_rate());
+        out_encoder.set_qmin(10);
+        out_encoder.set_qmax(51);
+        out_encoder.set_me_range(16);
+        out_encoder.set_me_range(16);
+        let mut out_opened = out_encoder
+            .open_as_with(out_codec, options)
+            .expect("Failed to open encoder");
+        // println!("w{}h{}", decoder.width(), decoder.height());
+        self.write_header();
+
+        for frame in self.frame_que.iter() {
+            let mut packet = Packet::empty(); // AVPacket
+            out_opened.send_frame(frame).expect("Failed to send frame");
+            out_opened
+                .receive_packet(&mut packet)
+                .expect("Failed to receive packet");
+            packet
+                .write(self.out_f_ctx.as_mut().unwrap())
+                .expect("Failed to write packet");
+        }
+        self.write_trailer();
     }
 
-    pub fn remuxer(&mut self) {
+    pub fn remuxer_stream(&mut self) {
         // write file header
         self.write_header();
 
@@ -182,10 +262,29 @@ impl<'a> FFmpeg<'a> {
                 Ok(_) => {}
                 Err(_) => break,
             };
-            unsafe {
-                av_free_packet(packet.as_mut_ptr());
-            }
         }
         self.write_trailer();
+    }
+}
+
+impl<'a> FFmpeg<'a> {
+    fn enqueue(&mut self, frame: Video) {
+        self.frame_que.push(frame);
+    }
+    fn write_header(&mut self) {
+        let mut options = Owned::new();
+        options.set("flvflags", "no_duration_filesize");
+        self.out_f_ctx
+            .as_mut()
+            .unwrap()
+            .write_header_with(options)
+            .expect("Failed to write output header");
+    }
+    fn write_trailer(&mut self) {
+        self.out_f_ctx
+            .as_mut()
+            .unwrap()
+            .write_trailer()
+            .expect("Failed to write output trailer");
     }
 }
