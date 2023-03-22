@@ -102,14 +102,14 @@ impl<'a> FFmpeg<'a> {
         let mut in_opened = in_codec_ctx
             .decoder()
             .open_as(in_codec)
-            .expect("Failed to open codec");
-
+            .expect("Failed to open codec")
+            .video()
+            .unwrap();
         // frame&packet
         // input::dump(in_f_ctx_mut, 0, self.in_path.to_str());
-
+        let mut idx = 0;
         loop {
             let mut packet = Packet::empty(); // AVPacket
-            let mut vid_frame = Video::empty(); // AVFrame
             match packet.read(self.in_f_ctx.as_mut().unwrap()) {
                 Ok(_) => {}
                 Err(_) => break,
@@ -119,10 +119,18 @@ impl<'a> FFmpeg<'a> {
                 in_opened
                     .send_packet(&packet)
                     .expect("Failed to send packet");
-                in_opened
-                    .receive_frame(&mut vid_frame)
-                    .expect("Failed to receive frame");
-                self.enqueue(vid_frame);
+                let mut vid_frame = Video::empty(); // AVFrame
+                match in_opened.receive_frame(&mut vid_frame) {
+                    Ok(_) => {
+                        idx += 1;
+                        println!("send {} frame", idx);
+                        self.enqueue(vid_frame);
+                    }
+                    Err(_) => {
+                        println!("continue");
+                        continue;
+                    }
+                };
             }
         }
     }
