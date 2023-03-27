@@ -1,6 +1,7 @@
+use ffmpeg_next::decoder::Opened;
 use ffmpeg_next::format::Pixel;
-use ffmpeg_next::frame::Video;
-use ffmpeg_next::{codec, Frame};
+use ffmpeg_next::frame::{Audio, Frame, Video};
+use ffmpeg_next::{codec, decoder, encoder};
 use ffmpeg_next::{
     dictionary::Owned,
     format::{
@@ -12,287 +13,145 @@ use ffmpeg_next::{
     Packet, Rational, Rescale, Rounding,
 };
 use ffmpeg_sys_next::AV_TIME_BASE;
+use std::ops::Deref;
 use std::path::Path;
 
-pub struct FFmpeg<'a> {
-    in_path: &'a Path,
-    out_path: &'a Path,
-    pub in_f_ctx: Option<Input>,   // AVFormatContext
-    pub out_f_ctx: Option<Output>, // AVFormatContext
-    stream_id: (i32, i32),
-    frame_que: Vec<Video>,
+#[derive(Default)]
+pub struct FmtCtx {
+    pub in_fmt_ctx: Option<Input>,   // AVFormatContext
+    pub out_fmt_ctx: Option<Output>, // AVFormatContext
+}
+// change to temple
+#[derive(Default)]
+pub struct StreamCtx {
+    pub dec_ctx: (Option<decoder::Video>, Option<decoder::Audio>), //AVCodecContext
+    pub enc_ctx: (Option<encoder::Video>, Option<encoder::audio::Audio>),
+    pub de_frame: (Option<Video>, Option<Audio>), //AVFrame
+    pub stream_idx: (u32, u32),
+    pub fmt_ctx: FmtCtx,
 }
 
-impl<'a> FFmpeg<'a> {
-    pub fn init(in_path: &'a Path, out_path: &'a Path) -> Self {
-        // register & network_init
-        format::register_all();
-        format::network::init();
-        FFmpeg {
-            in_path,
-            out_path,
-            in_f_ctx: None,
-            stream_id: (-1, -1),
-            out_f_ctx: None,
-            frame_que: vec![],
-        }
+impl StreamCtx {
+    pub fn new() -> Self {
+        StreamCtx::default()
     }
-
-    pub fn in_open(&mut self, options: Option<Owned>) {
-        self.in_f_ctx = match options {
+    pub fn in_open(&mut self, file_path: &Path, options: Option<Owned>) {
+        self.fmt_ctx.in_fmt_ctx = match options {
             Some(op) => Some(
-                format::input_with_dictionary(&self.in_path, op)
-                    .expect("Failed to open input file"),
+                format::input_with_dictionary(&file_path, op).expect("Failed to open input file"),
             ),
-            None => Some(format::input(&self.in_path).expect("Failed to open input file")),
+            None => Some(format::input(&file_path).expect("Failed to open input file")),
         };
-        let in_f_ctx = self.in_f_ctx.as_ref().unwrap();
-        for i in 0..in_f_ctx.nb_streams() {
-            let stream = in_f_ctx.stream(i as usize).unwrap();
-            match stream.codec().medium() {
+        for i in 0..self.fmt_ctx.in_fmt_ctx.as_ref().unwrap().nb_streams() {
+            let stream = self
+                .fmt_ctx
+                .in_fmt_ctx
+                .as_ref()
+                .unwrap()
+                .stream(i as usize)
+                .unwrap();
+            let dec = decoder::find(stream.codec().id()).unwrap(); //AVCodec
+            let codec_ctx = stream.codec();
+
+            match codec_ctx.medium() {
                 Type::Video => {
-                    self.stream_id.0 = i as i32;
-                    break;
+                    self.dec_ctx.0 =
+                        Some(codec_ctx.decoder().open_as(dec).unwrap().video().unwrap());
+                    self.de_frame.0 = Some(Video::empty()); // need fmt wh?
+                    self.stream_idx.0 = i;
+                    println!("video{}", i);
                 }
                 Type::Audio => {
-                    self.stream_id.1 = i as i32;
-                    break;
+                    self.dec_ctx.1 =
+                        Some(codec_ctx.decoder().open_as(dec).unwrap().audio().unwrap());
+                    self.de_frame.1 = Some(Audio::empty());
+                    self.stream_idx.1 = i;
+                    println!("audio{}", i);
                 }
                 _ => {}
             }
         }
-        input::dump(in_f_ctx, 0, self.in_path.to_str());
+        input::dump(
+            &self.fmt_ctx.in_fmt_ctx.as_ref().unwrap(),
+            0,
+            file_path.to_str(),
+        );
     }
-
-    pub fn out_open(&mut self, fmt: &str, options: Option<Owned>) {
-        self.out_f_ctx = match options {
+    pub fn out_open(&mut self, file_path: &Path, fmt: &str, options: Option<Owned>) {
+        self.fmt_ctx.out_fmt_ctx = match options {
             Some(op) => Some(
-                format::output_as_with(&self.out_path, fmt, op).expect("Failed to open output URL"),
+                format::output_as_with(&file_path, fmt, op).expect("Failed to open output URL"),
             ),
-            None => {
-                Some(format::output_as(&self.out_path, fmt).expect("Failed to open output URL"))
-            }
+            None => Some(format::output_as(&file_path, fmt).expect("Failed to open output URL")),
         };
-        let out_f_ctx_mut = self.out_f_ctx.as_mut().unwrap();
-        let in_f_ctx = self.in_f_ctx.as_ref().unwrap();
-
-        unsafe {
-            for i in 0..in_f_ctx.nb_streams() {
-                let input_stream = in_f_ctx.stream(i as usize).unwrap(); // stream.codec() => AVCodecContext
-                let output_stream = out_f_ctx_mut
-                    .add_stream(input_stream.codec().codec()) // stream.codec().codec() => AVCodec
-                    .expect("Failed add output stream");
-                output_stream.codec().clone_from(&input_stream.codec()); // avcodec_copy_context
-                (*output_stream.codec().as_mut_ptr()).codec_tag = 0;
-            }
-        }
-        output::dump(out_f_ctx_mut, 0, self.out_path.to_str());
-    }
-
-    pub fn decoder(&mut self) {
-        // open decoder
-        let in_codec_ctx = self
-            .in_f_ctx
-            .as_mut()
-            .unwrap()
-            .stream(self.stream_id.0 as usize)
-            .unwrap()
-            .codec(); // AVCodecContext
-        let in_codec = codec::decoder::find(in_codec_ctx.id()).expect("Failed to find codec"); // AVCodec
-        let mut in_opened = in_codec_ctx
-            .decoder()
-            .open_as(in_codec)
-            .expect("Failed to open codec")
-            .video()
-            .unwrap();
-        // frame&packet
-        // input::dump(in_f_ctx_mut, 0, self.in_path.to_str());
-        let mut idx = 0;
-        loop {
-            let mut packet = Packet::empty(); // AVPacket
-            match packet.read(self.in_f_ctx.as_mut().unwrap()) {
-                Ok(_) => {}
-                Err(_) => break,
-            };
-            // video packet
-            if packet.stream() == self.stream_id.0 as usize {
-                in_opened
-                    .send_packet(&packet)
-                    .expect("Failed to send packet");
-                let mut vid_frame = Video::empty(); // AVFrame
-                match in_opened.receive_frame(&mut vid_frame) {
-                    Ok(_) => {
-                        idx += 1;
-                        println!("send {} frame", idx);
-                        self.enqueue(vid_frame);
-                    }
-                    Err(_) => {
-                        println!("continue");
-                        continue;
-                    }
-                };
-            }
-        }
-    }
-    pub fn encoder(&mut self) {
-        // output_stream 如果不clone_from 需要单独设置
-        // open encoder
-        let out_codec_ctx = self
-            .out_f_ctx
-            .as_mut()
-            .unwrap()
-            .stream(self.stream_id.0 as usize)
-            .unwrap()
-            .codec(); // AVCodecContext
-
-        let out_codec = codec::encoder::find(out_codec_ctx.id()).expect("Failed to find codec"); // AVCodec
-        let mut options = Owned::new();
-        options.set("preset", "slow");
-        options.set("tune", "zerolatency");
-        let mut out_encoder = out_codec_ctx.encoder().video().unwrap();
-        // configure
-        let decoder = self
-            .in_f_ctx
-            .as_ref()
-            .unwrap()
-            .stream(self.stream_id.0 as usize)
-            .unwrap()
-            .codec()
-            .decoder()
-            .video()
-            .unwrap();
-        out_encoder.set_format(Pixel::YUV420P);
-        out_encoder.set_frame_rate(decoder.frame_rate());
-        out_encoder.set_width(decoder.width());
-        out_encoder.set_height(decoder.height());
-        out_encoder.set_time_base(decoder.time_base());
-        out_encoder.set_bit_rate(decoder.bit_rate());
-        out_encoder.set_qmin(10);
-        out_encoder.set_qmax(51);
-        out_encoder.set_me_range(16);
-        out_encoder.set_me_range(16);
-        let mut out_opened = out_encoder
-            .open_as_with(out_codec, options)
-            .expect("Failed to open encoder");
-        // println!("w{}h{}", decoder.width(), decoder.height());
-        self.write_header();
-
-        for frame in self.frame_que.iter() {
-            let mut packet = Packet::empty(); // AVPacket
-            out_opened.send_frame(frame).expect("Failed to send frame");
-            out_opened
-                .receive_packet(&mut packet)
-                .expect("Failed to receive packet");
-            packet
-                .write(self.out_f_ctx.as_mut().unwrap())
-                .expect("Failed to write packet");
-        }
-        self.write_trailer();
-    }
-
-    pub fn remuxer_stream(&mut self) {
-        // write file header
-        self.write_header();
-
-        let mut frame_idx = 0;
-        let start_time = current();
-        let mut old_dts: Option<i64> = None;
-
-        let mut in_f_ctx_mut = self.in_f_ctx.as_mut().unwrap();
-        let mut out_f_ctx_mut = self.out_f_ctx.as_mut().unwrap();
-
-        loop {
-            let mut packet = Packet::empty();
-            match packet.read(&mut in_f_ctx_mut) {
-                Ok(_) => {}
-                Err(_) => break,
-            };
-            // pts dts duration
-            if packet.pts().is_none() || packet.dts().is_none() {
-                //Write PTS
-                let stream = in_f_ctx_mut.stream(self.stream_id.0 as usize).unwrap();
-                let time_base = stream.time_base();
-                //Duration between 2 frames (us)
-                let duration = AV_TIME_BASE as i64 / f64::from(stream.rate()) as i64;
-                //Parameters
-                packet.set_pts(Some(
-                    ((frame_idx * duration) as f64 / (f64::from(time_base) * AV_TIME_BASE as f64))
-                        as i64,
-                ));
-                packet.set_dts(packet.pts());
-                packet.set_duration(
-                    (duration as f64 / (f64::from(time_base) * AV_TIME_BASE as f64)) as i64,
-                )
-            }
-            // delay
-            if packet.stream() == self.stream_id.0 as usize {
-                let time_base = in_f_ctx_mut
-                    .stream(self.stream_id.0 as usize)
-                    .unwrap()
-                    .time_base();
-                let time_base_q = Rational::new(1, AV_TIME_BASE);
-                let pts_time = packet.dts().unwrap().rescale(time_base, time_base_q);
-                let now_time = current() - start_time;
-                if pts_time > now_time {
-                    time::sleep((pts_time - now_time) as u32).expect("Failed to sleep");
+        for i in 0..self.fmt_ctx.in_fmt_ctx.as_ref().unwrap().nb_streams() {
+            let in_stream = self
+                .fmt_ctx
+                .in_fmt_ctx
+                .as_ref()
+                .unwrap()
+                .stream(i as usize)
+                .unwrap(); // stream.codec() => AVCodecContext
+            let out_stream = self
+                .fmt_ctx
+                .out_fmt_ctx
+                .as_mut()
+                .unwrap()
+                .add_stream(in_stream.codec().codec()) // stream.codec().codec() => AVCodec
+                .expect("Failed add output stream");
+            // out_stream.codec().clone_from(&in_stream.codec()); // avcodec_copy_context?
+            match in_stream.codec().medium() {
+                Type::Video => {
+                    let dec_ctx = self.dec_ctx.0.as_ref().unwrap();
+                    let codec = codec::encoder::find(dec_ctx.id()).expect("Failed to find codec"); // AVCodec
+                    let mut options = Owned::new();
+                    options.set("preset", "slow");
+                    options.set("tune", "zerolatency");
+                    let mut enc_ctx = out_stream.codec().encoder().video().unwrap();
+                    // configure
+                    enc_ctx.set_format(Pixel::YUV420P);
+                    enc_ctx.set_frame_rate(dec_ctx.frame_rate());
+                    enc_ctx.set_width(dec_ctx.width());
+                    enc_ctx.set_height(dec_ctx.height());
+                    enc_ctx.set_time_base(dec_ctx.time_base());
+                    enc_ctx.set_bit_rate(dec_ctx.bit_rate());
+                    enc_ctx.set_qmin(10);
+                    enc_ctx.set_qmax(51);
+                    enc_ctx.set_me_range(16);
+                    enc_ctx.set_me_range(16);
+                    let enc_ctx = enc_ctx.open_as(codec).unwrap();
+                    // let enc_ctx = enc_ctx.clone().encoder().video().unwrap(); // need???
+                    self.enc_ctx.0 = Some(enc_ctx);
                 }
+                Type::Audio => {
+                    let dec_ctx = self.dec_ctx.1.as_ref().unwrap();
+                    let codec = codec::encoder::find(dec_ctx.id()).expect("Failed to find codec"); // AVCodec
+                    let mut enc_ctx = out_stream.codec().encoder().audio().unwrap();
+                    enc_ctx.set_rate(dec_ctx.rate() as i32);
+                    // ch_layout
+                    enc_ctx.set_format(dec_ctx.format());
+                    enc_ctx.set_time_base(dec_ctx.time_base());
+                    enc_ctx.set_channel_layout(dec_ctx.channel_layout());
+                    let enc_ctx = enc_ctx.open_as(codec).unwrap();
+                    let enc_ctx = enc_ctx.clone().encoder().audio().unwrap(); // ???
+                    self.enc_ctx.1 = Some(enc_ctx);
+                }
+                _ => {}
             }
-            let in_stream = in_f_ctx_mut.stream(packet.stream()).unwrap();
-            let out_stream = out_f_ctx_mut.stream(packet.stream()).unwrap();
-            // copy packet
-            packet.set_pts(Some(packet.pts().unwrap().rescale_with(
-                in_stream.time_base(),
-                out_stream.time_base(),
-                Rounding::NearInfinity,
-            )));
-            packet.set_dts(Some(packet.dts().unwrap().rescale_with(
-                in_stream.time_base(),
-                out_stream.time_base(),
-                Rounding::NearInfinity,
-            )));
-            packet.set_duration(packet.duration().rescale_with(
-                in_stream.time_base(),
-                out_stream.time_base(),
-                Rounding::NearInfinity,
-            ));
-            packet.set_position(-1);
-            if old_dts.is_some() && old_dts.unwrap() > packet.dts().unwrap() {
-                packet.set_pts(Some(old_dts.unwrap() + packet.duration()));
-                packet.set_dts(packet.pts());
-            }
-            // handle error frame dts
-            old_dts = packet.dts();
-            if packet.stream() == self.stream_id.0 as usize {
-                println!("Send {} video frames to output URL\n", frame_idx);
-                frame_idx += 1;
-            }
-            match packet.write(&mut out_f_ctx_mut) {
-                Ok(_) => {}
-                Err(_) => break,
-            };
+            output::dump(
+                &self.fmt_ctx.out_fmt_ctx.as_ref().unwrap(),
+                0,
+                file_path.to_str(),
+            );
+            // init muxer
+            // let mut m_op = Owned::new();
+            // m_op.set("flvflags", "no_duration_filesize");
+            // self.fmt_ctx
+            //     .out_fmt_ctx
+            //     .as_mut()
+            //     .unwrap()
+            //     .write_header_with(m_op)
+            //     .unwrap();
         }
-        self.write_trailer();
-    }
-}
-
-impl<'a> FFmpeg<'a> {
-    fn enqueue(&mut self, frame: Video) {
-        self.frame_que.push(frame);
-    }
-    fn write_header(&mut self) {
-        let mut options = Owned::new();
-        options.set("flvflags", "no_duration_filesize");
-        self.out_f_ctx
-            .as_mut()
-            .unwrap()
-            .write_header_with(options)
-            .expect("Failed to write output header");
-    }
-    fn write_trailer(&mut self) {
-        self.out_f_ctx
-            .as_mut()
-            .unwrap()
-            .write_trailer()
-            .expect("Failed to write output trailer");
     }
 }
