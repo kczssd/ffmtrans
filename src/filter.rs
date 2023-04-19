@@ -1,4 +1,10 @@
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    ffi::CString,
+    mem,
+    ops::{Deref, DerefMut},
+    ptr,
+};
 
 use crate::ffmpeg::{FmtCtx, StreamCtx};
 use ffmpeg_next::{
@@ -6,9 +12,12 @@ use ffmpeg_next::{
     filter::{self, Context, Filter, Graph, Source},
     format,
     frame::Video,
-    picture, Frame, Packet, Rational,
+    picture, Error, Frame, Packet, Rational,
 };
-use ffmpeg_sys_next::av_packet_unref;
+use ffmpeg_sys_next::{
+    av_buffersink_params_alloc, av_packet_unref, avfilter_graph_create_filter, AVFrame,
+    AVPixelFormat, AV_PIX_FMT_YUV420P10,
+};
 #[derive(Default)]
 pub struct FilterCtx {
     filter_graph: Option<Graph>,
@@ -25,14 +34,17 @@ impl FilterCtx {
             "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect={}/{}",
             dec_ctx.width(),
             dec_ctx.height(),
-            dec_ctx.format() as usize,
+            dec_ctx.format() as isize,
             dec_ctx.time_base().numerator(),
             dec_ctx.time_base().denominator(),
             dec_ctx.aspect_ratio().numerator(),
             dec_ctx.aspect_ratio().denominator(),
         );
+        println!("dec_ctx init info!!:{}", args);
+        // find filter
         let buffesrc = filter::find("buffer").unwrap();
         let buffersink = filter::find("buffersink").unwrap();
+        // 创建滤波图
         let mut filter_graph = filter::Graph::new();
         // filter context
         let buffersrc_ctx = filter_graph.add(&buffesrc, "in", &args).unwrap().source();
@@ -46,11 +58,12 @@ impl FilterCtx {
         let date = "%{localtime\\:%a %b %d %Y}";
         let drawtext = format!("{}{}", drawtext, date);
         parser.parse(&drawtext).expect("Failed to parse drawtext");
-        //
+        // 初始化
         self.filter_graph = Some(filter_graph);
         self.en_pkt = Some(Packet::empty());
         self.filter_frame = Some(Video::empty());
     }
+
     pub fn filter_encode_write_frame(
         &mut self,
         frame: &Video,
@@ -58,34 +71,71 @@ impl FilterCtx {
         fmt_ctx: &mut FmtCtx,
     ) {
         let mut buffersrc_ctx = self.filter_graph.as_mut().unwrap().get("in").unwrap();
-        println!("add frame");
         buffersrc_ctx.set_pixel_format(format::Pixel::YUV420P);
-        buffersrc_ctx.source().add(frame).unwrap();
+        // println!(
+        //     "de_frame init info!!: video_size={}x{}:pix_fmt={}:pixel_aspect={}/{}:pts:{:?}",
+        //     frame.width(),
+        //     frame.height(),
+        //     frame.format() as usize,
+        //     frame.aspect_ratio().numerator(),
+        //     frame.aspect_ratio().denominator(),
+        //     frame.pts()
+        // );
+        unsafe {
+            let frame = frame.deref();
+            let f = frame.as_ptr() as *mut AVFrame;
+            // println!("format:{},pts:{}", (*f).format, (*f).pts);
+            (*f).format = 1; // 手动修复format？？？
+        }
+
+        println!("传frame到graph中");
+        // 传递frame到滤波图中
+        buffersrc_ctx
+            .source()
+            .add(frame)
+            .expect("Error while feeding the filtergraph");
+        println!("传frame到graph后");
         loop {
             let mut buffersink_ctx = self.filter_graph.as_mut().unwrap().get("out").unwrap();
-            buffersink_ctx.set_pixel_format(format::Pixel::YUV420P);
             let mut buffersink_ctx = buffersink_ctx.sink();
-            buffersink_ctx
-                .frame(self.filter_frame.as_mut().unwrap())
-                .unwrap();
+            println!("从graph中取frame");
+            let filter_frame = self.filter_frame.as_deref_mut().unwrap();
+            match buffersink_ctx.frame(filter_frame) {
+                Ok(()) => {
+                    println!("buffersink success!!!!!!!!!!!!!!!");
+                }
+                Err(e) => {
+                    println!("取frame出错了:{:?}", e);
+                    break;
+                }
+            };
             self.filter_frame
                 .as_mut()
                 .unwrap()
                 .set_kind(picture::Type::None);
-            self.encode_write_frame(enc_ctx, fmt_ctx);
             self.filter_frame = Some(Video::empty());
+            match self.encode_write_frame(enc_ctx, fmt_ctx) {
+                Ok(()) => {}
+                Err(_) => {
+                    break;
+                }
+            };
         }
     }
-    pub fn encode_write_frame(&mut self, enc_ctx: &mut encoder::Video, fmt_ctx: &mut FmtCtx) {
-        enc_ctx
-            .send_frame(self.filter_frame.as_deref().unwrap())
-            .expect("Failed to send frame");
+    pub fn encode_write_frame(
+        &mut self,
+        enc_ctx: &mut encoder::Video,
+        fmt_ctx: &mut FmtCtx,
+    ) -> Result<(), Error> {
+        enc_ctx.send_frame(self.filter_frame.as_deref().unwrap())?;
 
         loop {
             let en_packet = self.en_pkt.as_mut().unwrap();
             match enc_ctx.receive_packet(en_packet) {
                 Ok(_) => {}
-                Err(_) => {}
+                Err(_) => {
+                    break;
+                }
             };
             unsafe {
                 en_packet.set_stream(0);
@@ -101,13 +151,8 @@ impl FilterCtx {
                 )
             }
             // mux
-            match en_packet.write(fmt_ctx.out_fmt_ctx.as_mut().unwrap()) {
-                Ok(_) => {}
-                Err(e) => {
-                    println!("{}", e);
-                    break;
-                }
-            };
+            en_packet.write(fmt_ctx.out_fmt_ctx.as_mut().unwrap())?;
         }
+        Ok(())
     }
 }

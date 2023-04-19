@@ -1,0 +1,15 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name":"ffmtrans",
+            "type":"gdb",
+            "request": "launch",
+            "target": "target/debug/ffmtrans",
+            "cwd": "${workspaceFolder}",
+            "arguments": "...",
+            "gdbpath": "rust-gdb",
+            "printCalls": true
+        }
+    ]
+}
