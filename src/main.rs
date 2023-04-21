@@ -9,7 +9,6 @@ use ffmpeg::StreamCtx;
 use filter::FilterCtx;
 
 fn main() {
-    // ffmpeg -re -stream_loop -1 -i testmv.mp4 -c:v copy -c:a copy -rtsp_transport tcp -r 30 -b 2000k -s 1080x720 -f rtsp rtsp://localhost:8554/stream
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
     if args.len() != 3 {
@@ -18,32 +17,25 @@ fn main() {
     let input_path = Path::new(&args[1]);
     let output_url = Path::new(&args[2]);
 
-    // 初始化流上下文
-    // 打开输入流
+    // init stream context
     let mut options = Owned::new();
     options.set("rtsp_transport", "tcp");
     options.set("max_delay", "500");
-    // 打开输出流
     let mut stream_ctx = StreamCtx::init(input_path, Some(options), output_url, "flv", None);
-    // AVFormatContext
     let mut fmt_ctx = stream_ctx.fmt_ctx;
-    // 写入头信息
+    // write header
     fmt_ctx
         .out_fmt_ctx
         .write_header()
         .expect("Failed to write header");
     // filter init
     let mut filter_ctx = FilterCtx::init_filter(&stream_ctx.dec_ctx);
-    //
     let frame_idx = 0;
-    // frame pts
-    let mut v_pts = 1;
     loop {
         let mut packet = Packet::empty();
         match packet.read(&mut fmt_ctx.in_fmt_ctx) {
             Ok(_) => {}
             Err(e) => {
-                println!("{}", e);
                 continue;
             }
         }
@@ -54,17 +46,16 @@ fn main() {
         let stream_idx = packet.stream();
         // encoding video frame
         if stream_idx == stream_ctx.stream_idx.0 as usize {
-            // set pts dts duration?
+            // set pts dts duration
             if packet.pts().is_none() || packet.dts().is_none() {
-                //Write PTS
+                // write pts
                 let stream = fmt_ctx
                     .in_fmt_ctx
                     .stream(stream_ctx.stream_idx.0 as usize)
                     .unwrap();
                 let time_base = stream.time_base();
-                //Duration between 2 frames (us)
+                // duration between 2 frames
                 let duration = AV_TIME_BASE as i64 / f64::from(stream.rate()) as i64;
-                //Parameters
                 packet.set_pts(Some(
                     ((frame_idx * duration) as f64 / (f64::from(time_base) * AV_TIME_BASE as f64))
                         as i64,
@@ -79,7 +70,7 @@ fn main() {
             packet.rescale_ts(in_stream.time_base(), out_stream.time_base());
             packet.set_position(-1);
 
-            // 解码packet
+            // decode packet
             match stream_ctx.dec_ctx.send_packet(&packet) {
                 Ok(()) => {
                     println!("send_packet success");
@@ -104,7 +95,7 @@ fn main() {
                 &mut fmt_ctx,
             );
 
-            // 方案1：不经过filter编码packet
+            // plan 1: without filter
             // match stream_ctx.enc_ctx.send_frame(&stream_ctx.de_frame) {
             //     Ok(()) => {
             //         println!("send_frame success");
