@@ -65,11 +65,10 @@ impl StreamCtx {
         for i in 0..in_fmt_ctx.nb_streams() {
             let stream = in_fmt_ctx.stream(i as usize).unwrap();
             let parameters = stream.parameters();
-            let dec = decoder::find(parameters.id()).unwrap();
             let codec_ctx = Context::from_parameters(parameters).unwrap();
             match stream.parameters().medium() {
                 Type::Video => {
-                    let mut opened_ctx = codec_ctx.decoder().open_as(dec).unwrap();
+                    let mut opened_ctx = codec_ctx.decoder();
                     unsafe {
                         (*opened_ctx.as_mut_ptr()).framerate = Rational::new(30, 1).into();
                         (*opened_ctx.as_mut_ptr()).time_base = Rational::new(1, 30).into();
@@ -118,7 +117,7 @@ impl StreamCtx {
                         .video()
                         .unwrap();
                     // configure
-                    opened_ctx.set_format(Pixel::YUV422P);
+                    opened_ctx.set_format(Pixel::YUV420P);
                     opened_ctx.set_width(dec_ctx.width());
                     opened_ctx.set_height(dec_ctx.height());
                     opened_ctx.set_time_base(Rational::new(

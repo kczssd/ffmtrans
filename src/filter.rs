@@ -11,13 +11,10 @@ use ffmpeg_next::{
     filter::{self, Graph},
     format::{self, Pixel},
     frame::Video,
+    option::Settable,
     picture, Packet,
 };
-use ffmpeg_sys_next::{
-    av_buffersrc_add_frame_flags, av_opt_set_bin, avfilter_graph_config, AVFrame,
-    AV_OPT_SEARCH_CHILDREN,
-};
-use std::ffi::CString;
+use ffmpeg_sys_next::{avfilter_graph_config, AVFrame};
 
 pub struct FilterCtx {
     filter_graph: Graph,
@@ -33,7 +30,8 @@ impl FilterCtx {
             "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect={}/{}",
             dec_ctx.width(),
             dec_ctx.height(),
-            dec_ctx.format() as isize,
+            // 修复Changing video frame properties on the fly is not supported by all filters.
+            dec_ctx.format() as isize - 1,
             dec_ctx.time_base().numerator(),
             dec_ctx.time_base().denominator(),
             dec_ctx.aspect_ratio().numerator(),
@@ -42,18 +40,10 @@ impl FilterCtx {
         // 配置滤镜实例
         let buffesrc: ffmpeg_next::Filter = filter::find("buffer").unwrap();
         let buffersink = filter::find("buffersink").unwrap();
-        let buffersrc_ctx = filter_graph.add(&buffesrc, "in", &args).unwrap().source();
+        let mut buffersrc_ctx = filter_graph.add(&buffesrc, "in", &args).unwrap();
+        buffersrc_ctx.set_pixel_format(Pixel::YUV420P);
         let mut buffersink_ctx = filter_graph.add(&buffersink, "out", "").unwrap();
-        // unsafe {
-        //     let pix = CString::new("pix_fmts").unwrap().as_ptr();
-        //     av_opt_set_bin(
-        //         buffersink_ctx.as_mut_ptr() as *mut c_void,
-        //         pix,
-        //         1 as *const u8,
-        //         4,
-        //         AV_OPT_SEARCH_CHILDREN,
-        //     );
-        // }
+        buffersink_ctx.set_pixel_format(Pixel::YUV420P);
         // parser
         let parser = filter::graph::Parser::new(&mut filter_graph);
         let parser = parser.output("in", 0).unwrap();
@@ -80,34 +70,25 @@ impl FilterCtx {
         fmt_ctx: &mut FmtCtx,
     ) {
         let mut buffersrc_ctx = self.filter_graph.get("in").unwrap();
-        buffersrc_ctx.set_pixel_format(format::Pixel::YUV420P);
         // println!(
-        //     "de_frame init info!!: video_size={}x{}:pix_fmt={}:pixel_aspect={}/{}:pts:{:?}",
+        //     "de_frame init info!!: video_size={}x{}:pix_fmt={}:pixel_aspect={}/{}:pts:{:?}:flags:{:?}",
         //     frame.width(),
         //     frame.height(),
         //     frame.format() as usize,
         //     frame.aspect_ratio().numerator(),
         //     frame.aspect_ratio().denominator(),
-        //     frame.pts()
+        //     frame.pts(),
+        //     frame.flags()
         // );
-        // unsafe {
-        //     let frame = frame.deref();
-        //     let f = frame.as_ptr() as *mut AVFrame;
-        //     // println!("format:{},pts:{}", (*f).format, (*f).pts);
-        //     (*f).format = 5; // 手动修复format？？？
-        // }
 
         // 传递frame到滤波图中
         buffersrc_ctx
             .source()
             .add(frame)
             .expect("Error while feeding the filtergraph");
-        // unsafe {
-        //     av_buffersrc_add_frame_flags(buffersrc_ctx.as_mut_ptr(), frame.as_mut_ptr(), 0);
-        // }
         loop {
             let mut buffersink_ctx = self.filter_graph.get("out").unwrap();
-            buffersink_ctx.set_pixel_format(Pixel::YUV422P);
+
             let mut buffersink_ctx = buffersink_ctx.sink();
             let filter_frame = self.filter_frame.deref_mut();
             match buffersink_ctx.frame(filter_frame) {
@@ -134,7 +115,6 @@ impl FilterCtx {
         enc_ctx: &mut encoder::Video,
         fmt_ctx: &mut FmtCtx,
     ) -> Result<(), &str> {
-        println!("fmt:{:?}", self.filter_frame.format()); // TODO: YUV422P to YUV420P
         let mut en_pkg = Packet::empty();
         match enc_ctx.send_frame(self.filter_frame.deref()) {
             Ok(_) => {
