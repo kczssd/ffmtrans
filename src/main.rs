@@ -1,16 +1,11 @@
-use ffmpeg_next::{
-    dictionary::Owned,
-    format,
-    time::{self, current},
-    Packet, Rational, Rescale, Rounding,
-};
+use ffmpeg_next::{dictionary::Owned, Packet};
 use ffmpeg_sys_next::AV_TIME_BASE;
 use std::env;
 use std::path::Path;
 
 mod ffmpeg;
 mod filter;
-use ffmpeg::{FmtCtx, StreamCtx};
+use ffmpeg::StreamCtx;
 use filter::FilterCtx;
 
 fn main() {
@@ -24,41 +19,29 @@ fn main() {
     let output_url = Path::new(&args[2]);
 
     // 初始化流上下文
-    let mut stream_ctx = StreamCtx::new();
     // 打开输入流
     let mut options = Owned::new();
     options.set("rtsp_transport", "tcp");
     options.set("max_delay", "500");
-    stream_ctx.input_open(input_path, Some(options));
     // 打开输出流
-    stream_ctx.out_open(output_url, "flv", None);
+    let mut stream_ctx = StreamCtx::init(input_path, Some(options), output_url, "flv", None);
     // AVFormatContext
     let mut fmt_ctx = stream_ctx.fmt_ctx;
     // 写入头信息
     fmt_ctx
         .out_fmt_ctx
-        .as_mut()
-        .unwrap()
         .write_header()
         .expect("Failed to write header");
     // filter init
-    let mut filter_ctx = FilterCtx::default();
-    filter_ctx.init_filter(stream_ctx.dec_ctx.as_ref().unwrap());
+    let mut filter_ctx = FilterCtx::init_filter(&stream_ctx.dec_ctx);
     //
     let frame_idx = 0;
     // frame pts
     let mut v_pts = 1;
     loop {
         let mut packet = Packet::empty();
-        match packet.read(fmt_ctx.in_fmt_ctx.as_mut().unwrap()) {
-            Ok(_) => {
-                // println!(
-                //     "pts:{:?},dts:{:?},duration:{}",
-                //     packet.pts(),
-                //     packet.dts(),
-                //     packet.duration()
-                // )
-            }
+        match packet.read(&mut fmt_ctx.in_fmt_ctx) {
+            Ok(_) => {}
             Err(e) => {
                 println!("{}", e);
                 continue;
@@ -76,8 +59,6 @@ fn main() {
                 //Write PTS
                 let stream = fmt_ctx
                     .in_fmt_ctx
-                    .as_ref()
-                    .unwrap()
                     .stream(stream_ctx.stream_idx.0 as usize)
                     .unwrap();
                 let time_base = stream.time_base();
@@ -93,31 +74,13 @@ fn main() {
                     (duration as f64 / (f64::from(time_base) * AV_TIME_BASE as f64)) as i64,
                 )
             }
-            let in_stream = fmt_ctx
-                .in_fmt_ctx
-                .as_ref()
-                .unwrap()
-                .stream(packet.stream())
-                .unwrap();
-            let out_stream = fmt_ctx
-                .out_fmt_ctx
-                .as_ref()
-                .unwrap()
-                .stream(packet.stream())
-                .unwrap();
-            // println!(
-            //     "in_stream.time_base:{:?},out_stream.time_base:{:?},dec_ctx.time_base:{:?},enc_ctx.time_base:{:?}",
-            //     in_stream.time_base(),
-            //     out_stream.time_base(),
-            //     stream_ctx.dec_ctx.as_ref().unwrap().time_base(),
-            //     unsafe{(*stream_ctx.enc_ctx.as_ref().unwrap().as_ptr()).time_base}
-            // );
+            let in_stream = fmt_ctx.in_fmt_ctx.stream(packet.stream()).unwrap();
+            let out_stream = fmt_ctx.out_fmt_ctx.stream(packet.stream()).unwrap();
             packet.rescale_ts(in_stream.time_base(), out_stream.time_base());
             packet.set_position(-1);
 
             // 解码packet
-            let dec_ctx = stream_ctx.dec_ctx.as_mut().unwrap();
-            match dec_ctx.send_packet(&packet) {
+            match stream_ctx.dec_ctx.send_packet(&packet) {
                 Ok(()) => {
                     println!("send_packet success");
                 }
@@ -126,7 +89,7 @@ fn main() {
                     continue;
                 }
             };
-            match dec_ctx.receive_frame(stream_ctx.de_frame.as_mut().unwrap()) {
+            match stream_ctx.dec_ctx.receive_frame(&mut stream_ctx.de_frame) {
                 Ok(()) => {
                     println!("receive_frame success");
                 }
@@ -135,18 +98,9 @@ fn main() {
                     continue;
                 }
             }
-            let de_frame = stream_ctx.de_frame.as_mut().unwrap();
-            println!(
-                "pts:{:?},fmt:{:?},height:{},width:{},timestamp:{:?}",
-                de_frame.pts(),
-                de_frame.format(),
-                de_frame.height(),
-                de_frame.width(),
-                de_frame.timestamp()
-            );
             filter_ctx.filter_encode_write_frame(
-                de_frame,
-                stream_ctx.enc_ctx.as_mut().unwrap(),
+                &mut stream_ctx.de_frame,
+                &mut stream_ctx.enc_ctx,
                 &mut fmt_ctx,
             );
 
@@ -176,22 +130,10 @@ fn main() {
             //     .unwrap();
         } else {
             packet.rescale_ts(
-                fmt_ctx
-                    .in_fmt_ctx
-                    .as_ref()
-                    .unwrap()
-                    .stream(stream_idx)
-                    .unwrap()
-                    .time_base(),
-                fmt_ctx
-                    .out_fmt_ctx
-                    .as_ref()
-                    .unwrap()
-                    .stream(stream_idx)
-                    .unwrap()
-                    .time_base(),
+                fmt_ctx.in_fmt_ctx.stream(stream_idx).unwrap().time_base(),
+                fmt_ctx.out_fmt_ctx.stream(stream_idx).unwrap().time_base(),
             );
-            packet.write(fmt_ctx.out_fmt_ctx.as_mut().unwrap()).unwrap();
+            packet.write(&mut fmt_ctx.out_fmt_ctx).unwrap();
         }
     }
 }
