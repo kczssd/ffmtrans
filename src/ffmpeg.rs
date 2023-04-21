@@ -118,7 +118,7 @@ impl StreamCtx {
                         .video()
                         .unwrap();
                     // configure
-                    opened_ctx.set_format(Pixel::YUV420P);
+                    opened_ctx.set_format(Pixel::YUV422P);
                     opened_ctx.set_width(dec_ctx.width());
                     opened_ctx.set_height(dec_ctx.height());
                     opened_ctx.set_time_base(Rational::new(

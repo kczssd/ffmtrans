@@ -105,8 +105,7 @@ fn main() {
             );
 
             // 方案1：不经过filter编码packet
-            // let enc_ctx = stream_ctx.enc_ctx.as_mut().unwrap();
-            // match enc_ctx.send_frame(stream_ctx.de_frame.as_mut().unwrap()) {
+            // match stream_ctx.enc_ctx.send_frame(&stream_ctx.de_frame) {
             //     Ok(()) => {
             //         println!("send_frame success");
             //     }
@@ -116,7 +115,7 @@ fn main() {
             //     }
             // }
             // let mut re_packet = Packet::empty();
-            // match enc_ctx.receive_packet(&mut re_packet) {
+            // match stream_ctx.enc_ctx.receive_packet(&mut re_packet) {
             //     Ok(()) => {
             //         println!("receive_packet success");
             //     }
@@ -125,9 +124,7 @@ fn main() {
             //         continue;
             //     }
             // }
-            // re_packet
-            //     .write(fmt_ctx.out_fmt_ctx.as_mut().unwrap())
-            //     .unwrap();
+            // re_packet.write(&mut fmt_ctx.out_fmt_ctx).unwrap();
         } else {
             packet.rescale_ts(
                 fmt_ctx.in_fmt_ctx.stream(stream_idx).unwrap().time_base(),

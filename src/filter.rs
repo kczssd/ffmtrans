@@ -21,7 +21,6 @@ use std::ffi::CString;
 
 pub struct FilterCtx {
     filter_graph: Graph,
-    en_pkt: Packet,      //AVPacket
     filter_frame: Video, //AVFrame
 }
 
@@ -70,7 +69,6 @@ impl FilterCtx {
         // 初始化
         FilterCtx {
             filter_graph,
-            en_pkt: Packet::empty(),
             filter_frame: Video::new(Pixel::YUV420P, 1280, 800),
         }
     }
@@ -96,7 +94,7 @@ impl FilterCtx {
         //     let frame = frame.deref();
         //     let f = frame.as_ptr() as *mut AVFrame;
         //     // println!("format:{},pts:{}", (*f).format, (*f).pts);
-        //     (*f).format = 1; // 手动修复format？？？
+        //     (*f).format = 5; // 手动修复format？？？
         // }
 
         // 传递frame到滤波图中
@@ -136,24 +134,23 @@ impl FilterCtx {
         enc_ctx: &mut encoder::Video,
         fmt_ctx: &mut FmtCtx,
     ) -> Result<(), &str> {
-        self.filter_frame.set_format(Pixel::YUV420P); // need?
-        println!("fmt:{:?}", self.filter_frame.format());
+        println!("fmt:{:?}", self.filter_frame.format()); // TODO: YUV422P to YUV420P
+        let mut en_pkg = Packet::empty();
         match enc_ctx.send_frame(self.filter_frame.deref()) {
             Ok(_) => {
                 println!("send_frame success,pts:{:?}", self.filter_frame.pts());
             }
             Err(_) => return Err("send_frame failed"),
         };
-
         loop {
-            match enc_ctx.receive_packet(&mut self.en_pkt) {
+            match enc_ctx.receive_packet(&mut en_pkg) {
                 Ok(_) => {
                     println!("receive_packet success");
                 }
                 Err(_) => return Err("receive_packet failed"),
             };
             // mux
-            match self.en_pkt.write(&mut fmt_ctx.out_fmt_ctx) {
+            match en_pkg.write(&mut fmt_ctx.out_fmt_ctx) {
                 Ok(_) => {
                     println!("write frame success");
                 }
