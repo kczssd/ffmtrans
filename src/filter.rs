@@ -1,7 +1,4 @@
-use std::{
-    ops::{Deref, DerefMut},
-    ptr,
-};
+use std::ops::{Deref, DerefMut};
 
 use crate::ffmpeg::FmtCtx;
 use ffmpeg_next::{
@@ -52,7 +49,7 @@ impl FilterCtx {
         filter_graph.validate().expect("Failed to connect filters");
         FilterCtx {
             filter_graph,
-            filter_frame: Video::new(Pixel::YUV420P, 1280, 800),
+            filter_frame: Video::new(Pixel::YUV420P, dec_ctx.width(), dec_ctx.height()),
         }
     }
 
@@ -83,13 +80,17 @@ impl FilterCtx {
             self.filter_frame.set_kind(picture::Type::None);
             // mux frame
             match self.encode_write_frame(enc_ctx, fmt_ctx) {
-                Ok(()) => self.filter_frame = Video::new(Pixel::YUV420P, 1280, 800),
+                Ok(()) => {
+                    self.filter_frame = Video::new(Pixel::YUV420P, frame.width(), frame.height())
+                }
                 Err(_) => {
+                    self.filter_frame = Video::new(Pixel::YUV420P, frame.width(), frame.height());
                     break;
                 }
             };
         }
     }
+
     pub fn encode_write_frame(
         &mut self,
         enc_ctx: &mut encoder::Video,
@@ -109,6 +110,13 @@ impl FilterCtx {
                 }
                 Err(_) => return Err("receive_packet failed"),
             };
+            en_pkt.set_stream(0);
+            unsafe {
+                en_pkt.rescale_ts(
+                    (*enc_ctx.as_ptr()).time_base,
+                    fmt_ctx.out_fmt_ctx.stream(0).unwrap().time_base(),
+                )
+            }
             // write to stream
             match en_pkt.write(&mut fmt_ctx.out_fmt_ctx) {
                 Ok(_) => {

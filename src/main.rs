@@ -1,5 +1,4 @@
 use ffmpeg_next::{dictionary::Owned, Packet};
-use ffmpeg_sys_next::AV_TIME_BASE;
 use std::env;
 use std::path::Path;
 
@@ -30,12 +29,11 @@ fn main() {
         .expect("Failed to write header");
     // filter init
     let mut filter_ctx = FilterCtx::init_filter(&stream_ctx.dec_ctx);
-    let frame_idx = 0;
     loop {
         let mut packet = Packet::empty();
         match packet.read(&mut fmt_ctx.in_fmt_ctx) {
             Ok(_) => {}
-            Err(e) => {
+            Err(_) => {
                 continue;
             }
         }
@@ -46,29 +44,8 @@ fn main() {
         let stream_idx = packet.stream();
         // encoding video frame
         if stream_idx == stream_ctx.stream_idx.0 as usize {
-            // set pts dts duration
-            if packet.pts().is_none() || packet.dts().is_none() {
-                // write pts
-                let stream = fmt_ctx
-                    .in_fmt_ctx
-                    .stream(stream_ctx.stream_idx.0 as usize)
-                    .unwrap();
-                let time_base = stream.time_base();
-                // duration between 2 frames
-                let duration = AV_TIME_BASE as i64 / f64::from(stream.rate()) as i64;
-                packet.set_pts(Some(
-                    ((frame_idx * duration) as f64 / (f64::from(time_base) * AV_TIME_BASE as f64))
-                        as i64,
-                ));
-                packet.set_dts(packet.pts());
-                packet.set_duration(
-                    (duration as f64 / (f64::from(time_base) * AV_TIME_BASE as f64)) as i64,
-                )
-            }
-            let in_stream = fmt_ctx.in_fmt_ctx.stream(packet.stream()).unwrap();
-            let out_stream = fmt_ctx.out_fmt_ctx.stream(packet.stream()).unwrap();
-            packet.rescale_ts(in_stream.time_base(), out_stream.time_base());
-            packet.set_position(-1);
+            let in_stream = fmt_ctx.in_fmt_ctx.stream(stream_idx).unwrap();
+            packet.rescale_ts(in_stream.time_base(), stream_ctx.dec_ctx.time_base());
 
             // decode packet
             match stream_ctx.dec_ctx.send_packet(&packet) {
@@ -89,6 +66,8 @@ fn main() {
                     continue;
                 }
             }
+            let best_timestamp = stream_ctx.de_frame.timestamp();
+            stream_ctx.de_frame.set_pts(best_timestamp);
             filter_ctx.filter_encode_write_frame(
                 &mut stream_ctx.de_frame,
                 &mut stream_ctx.enc_ctx,

@@ -11,7 +11,7 @@ use ffmpeg_next::{
     media::Type,
     Rational,
 };
-use ffmpeg_sys_next::{avcodec_parameters_copy, avcodec_parameters_from_context};
+use ffmpeg_sys_next::{av_guess_frame_rate, avcodec_parameters_copy};
 use std::path::Path;
 use std::ptr;
 
@@ -50,32 +50,36 @@ impl StreamCtx {
             },
         }
     }
+
     pub fn input_open(
         file_path: &Path,
         options: Option<Owned>,
     ) -> (Input, decoder::Video, (u32, u32)) {
+        let mut dec_ctx = None;
+        let mut stream_idx = (0, 0);
+
         let in_fmt_ctx = match options {
             Some(op) => {
                 format::input_with_dictionary(&file_path, op).expect("Failed to open input file")
             }
             None => format::input(&file_path).expect("Failed to open input file"),
         };
-        let mut dec_ctx = None;
-        let mut stream_idx = (0, 0);
+
         for i in 0..in_fmt_ctx.nb_streams() {
             let stream = in_fmt_ctx.stream(i as usize).unwrap();
-            let parameters = stream.parameters();
-            let codec_ctx = Context::from_parameters(parameters).unwrap();
             match stream.parameters().medium() {
                 Type::Video => {
-                    let mut opened_ctx = codec_ctx.decoder();
+                    let parameters = stream.parameters();
+                    let codec_ctx = Context::from_parameters(parameters).unwrap();
+                    let mut codec_ctx = codec_ctx.decoder();
                     unsafe {
-                        (*opened_ctx.as_mut_ptr()).framerate = Rational::new(30, 1).into();
-                        (*opened_ctx.as_mut_ptr()).time_base = Rational::new(1, 30).into();
-                        (*opened_ctx.as_mut_ptr()).sample_aspect_ratio =
-                            Rational::new(1280, 800).into();
+                        (*codec_ctx.as_mut_ptr()).framerate = av_guess_frame_rate(
+                            in_fmt_ctx.as_ptr() as *mut _,
+                            stream.as_ptr() as *mut _,
+                            ptr::null_mut(),
+                        );
                     }
-                    dec_ctx = Some(opened_ctx.video().unwrap());
+                    dec_ctx = Some(codec_ctx.video().unwrap());
                     stream_idx.0 = i;
                 }
                 Type::Audio => {
@@ -88,6 +92,7 @@ impl StreamCtx {
         input::dump(&in_fmt_ctx, 0, file_path.to_str());
         (in_fmt_ctx, dec_ctx.unwrap(), stream_idx)
     }
+
     pub fn out_open(
         file_path: &Path,
         fmt: &str,
@@ -95,13 +100,15 @@ impl StreamCtx {
         in_fmt_ctx: &Input,
         dec_ctx: &decoder::Video,
     ) -> (Output, encoder::Video) {
+        let mut enc_ctx = None;
+
         let mut out_fmt_ctx = match options {
             Some(op) => {
                 format::output_as_with(&file_path, fmt, op).expect("Failed to open output URL")
             }
             None => format::output_as(&file_path, fmt).expect("Failed to open output URL"),
         };
-        let mut enc_ctx = None;
+
         for i in 0..in_fmt_ctx.nb_streams() {
             let in_stream = in_fmt_ctx.stream(i as usize).unwrap();
             let mut out_stream = out_fmt_ctx
@@ -110,29 +117,31 @@ impl StreamCtx {
             let parameters = in_stream.parameters();
             match parameters.medium() {
                 Type::Video => {
-                    let codec = codec::encoder::find(dec_ctx.id()).expect("Failed to find codec"); // AVCodec
-                    let mut opened_ctx = Context::new().encoder().video().unwrap();
+                    let codec = codec::encoder::find(dec_ctx.id()).expect("Failed to find codec");
+                    let mut codec_ctx = Context::new().encoder().video().unwrap();
                     // encode context configure
-                    opened_ctx.set_format(Pixel::YUV420P);
-                    opened_ctx.set_width(dec_ctx.width());
-                    opened_ctx.set_height(dec_ctx.height());
-                    opened_ctx.set_time_base(Rational::new(
+                    codec_ctx.set_height(dec_ctx.height());
+                    codec_ctx.set_width(dec_ctx.width());
+                    codec_ctx.set_aspect_ratio(dec_ctx.aspect_ratio());
+                    codec_ctx.set_frame_rate(dec_ctx.frame_rate());
+                    codec_ctx.set_gop(50);
+                    codec_ctx.set_max_b_frames(0);
+                    codec_ctx.set_format(Pixel::YUV420P);
+                    codec_ctx.set_time_base(Rational::new(
                         dec_ctx.frame_rate().unwrap().denominator(),
                         dec_ctx.frame_rate().unwrap().numerator(),
                     ));
-                    opened_ctx.set_frame_rate(dec_ctx.frame_rate());
-                    opened_ctx.set_bit_rate(50 * 1024 * 8);
-                    opened_ctx.set_max_b_frames(0);
-                    opened_ctx.set_gop(50);
-                    // fix h264 setting
-                    opened_ctx.set_qmin(10);
-                    opened_ctx.set_qmax(51);
-                    opened_ctx.set_me_range(16);
-                    let opened_ctx = opened_ctx.open_as(codec).unwrap();
+                    // // fix h264 setting
+                    codec_ctx.set_qmin(10);
+                    codec_ctx.set_qmax(51);
+                    codec_ctx.set_me_range(16);
+                    let codec_ctx = codec_ctx.open_as(codec).unwrap();
                     // set out stream
-                    out_stream.set_parameters(parameters);
-                    out_stream.set_time_base(dec_ctx.time_base());
-                    enc_ctx = Some(opened_ctx);
+                    unsafe {
+                        out_stream.set_parameters(parameters);
+                        (*out_stream.as_mut_ptr()).time_base = (*codec_ctx.as_ptr()).time_base;
+                    }
+                    enc_ctx = Some(codec_ctx);
                 }
                 Type::Audio => unsafe {
                     avcodec_parameters_copy(
