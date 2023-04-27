@@ -101,12 +101,7 @@ fn main() {
                 fmt_ctx.in_fmt_ctx.stream(stream_idx).unwrap().time_base(),
                 out_fmt_timebase,
             );
-            packet.set_dts(Some(
-                (time_gap.video_time / f64::from(out_fmt_timebase)) as i64,
-            ));
-            packet.set_pts(Some(
-                (time_gap.video_time / f64::from(out_fmt_timebase)) as i64,
-            ));
+
             let audio_time: f64 = packet.pts().unwrap() as f64 * f64::from(out_fmt_timebase);
             // println!("autio_time:{}s,pts:{:?}", audio_time, packet.pts());
             time_gap.audio_time = audio_time;

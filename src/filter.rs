@@ -117,6 +117,12 @@ impl FilterCtx {
             unsafe {
                 en_pkt.rescale_ts((*enc_ctx.as_ptr()).time_base, out_fmt_timebase);
             }
+            en_pkt.set_dts(Some(
+                (time_gap.audio_time / f64::from(out_fmt_timebase)) as i64,
+            ));
+            en_pkt.set_pts(Some(
+                (time_gap.audio_time / f64::from(out_fmt_timebase)) as i64,
+            ));
             let video_time: f64 = en_pkt.pts().unwrap() as f64 * f64::from(out_fmt_timebase);
             time_gap.video_time = video_time;
             // write to stream
