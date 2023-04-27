@@ -1,6 +1,6 @@
 use std::ops::{Deref, DerefMut};
 
-use crate::ffmpeg::FmtCtx;
+use crate::{ffmpeg::FmtCtx, TimeGap};
 use ffmpeg_next::{
     decoder, encoder,
     filter::{self, Graph},
@@ -58,6 +58,7 @@ impl FilterCtx {
         frame: &mut Video,
         enc_ctx: &mut encoder::Video,
         fmt_ctx: &mut FmtCtx,
+        time_gap: &mut TimeGap,
     ) {
         // send frame to filter graph
         let mut buffersrc_ctx = self.filter_graph.get("in").unwrap();
@@ -79,7 +80,7 @@ impl FilterCtx {
             };
             self.filter_frame.set_kind(picture::Type::None);
             // mux frame
-            match self.encode_write_frame(enc_ctx, fmt_ctx) {
+            match self.encode_write_frame(enc_ctx, fmt_ctx, time_gap) {
                 Ok(()) => {
                     self.filter_frame = Video::new(Pixel::YUV420P, frame.width(), frame.height())
                 }
@@ -95,35 +96,36 @@ impl FilterCtx {
         &mut self,
         enc_ctx: &mut encoder::Video,
         fmt_ctx: &mut FmtCtx,
+        time_gap: &mut TimeGap,
     ) -> Result<(), &str> {
         let mut en_pkt = Packet::empty();
         match enc_ctx.send_frame(self.filter_frame.deref()) {
             Ok(_) => {
-                println!("send_frame success");
+                // println!("send_frame success");
             }
             Err(_) => return Err("send_frame failed"),
         };
         loop {
             match enc_ctx.receive_packet(&mut en_pkt) {
                 Ok(_) => {
-                    println!("receive_packet success");
+                    // println!("receive_packet success");
                 }
                 Err(_) => return Err("receive_packet failed"),
             };
             en_pkt.set_stream(0);
+            let out_fmt_timebase = fmt_ctx.out_fmt_ctx.stream(0).unwrap().time_base();
             unsafe {
-                en_pkt.rescale_ts(
-                    (*enc_ctx.as_ptr()).time_base,
-                    fmt_ctx.out_fmt_ctx.stream(0).unwrap().time_base(),
-                )
+                en_pkt.rescale_ts((*enc_ctx.as_ptr()).time_base, out_fmt_timebase);
             }
+            let video_time: f64 = en_pkt.pts().unwrap() as f64 * f64::from(out_fmt_timebase);
+            time_gap.video_time = video_time;
             // write to stream
             match en_pkt.write(&mut fmt_ctx.out_fmt_ctx) {
                 Ok(_) => {
-                    println!("----write packet success----");
+                    // println!("----write packet success----");
                 }
                 Err(_) => {
-                    println!("write frame failed");
+                    // println!("write frame failed");
                     return Err("write frame failed");
                 }
             };
