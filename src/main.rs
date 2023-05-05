@@ -1,3 +1,4 @@
+use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer};
 use ffmpeg_next::{dictionary::Owned, Packet};
 use std::default::Default;
 use std::env;
@@ -14,15 +15,7 @@ struct TimeGap {
     pub video_time: f64,
 }
 
-fn main() {
-    // Parse command line arguments
-    let args: Vec<String> = env::args().collect();
-    if args.len() != 3 {
-        panic!("Usage: ./rtsp_to_rtmp <rtsp://stream-url> <rtmp://stream-url>");
-    }
-    let input_path = Path::new(&args[1]);
-    let output_url = Path::new(&args[2]);
-
+fn ffmtrans(input_path: &Path, output_url: &Path) {
     // init stream context
     let mut options = Owned::new();
     options.set("rtsp_transport", "tcp");
@@ -108,4 +101,26 @@ fn main() {
             packet.write(&mut fmt_ctx.out_fmt_ctx).unwrap();
         }
     }
+}
+
+async fn trans_handler(body: String, req: HttpRequest) -> HttpResponse {
+    println!("{body}{req:?}");
+    HttpResponse::Ok().body("ok")
+}
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    // Parse command line arguments
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 3 {
+        panic!("Usage: ./rtsp_to_rtmp <rtsp://stream-url> <rtmp://stream-url>");
+    }
+    let input_path = Path::new(&args[1]);
+    let output_url = Path::new(&args[2]);
+
+    // route
+    HttpServer::new(|| App::new().route("/setosd", web::post().to(trans_handler)))
+        .bind(("127.0.0.1", 3000))?
+        .run()
+        .await
 }
