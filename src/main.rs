@@ -1,8 +1,13 @@
+use actix_web::web::Data;
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer};
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use ffmpeg_next::{dictionary::Owned, Packet};
+use serde::Deserialize;
 use std::default::Default;
 use std::env;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 
 mod ffmpeg;
 mod filter;
@@ -15,7 +20,7 @@ struct TimeGap {
     pub video_time: f64,
 }
 
-fn ffmtrans(input_path: &Path, output_url: &Path) {
+fn ffmtrans(input_path: &Path, output_url: &Path, osd: &str, rx: Receiver<ThreadMsg>) {
     // init stream context
     let mut options = Owned::new();
     options.set("rtsp_transport", "tcp");
@@ -29,11 +34,26 @@ fn ffmtrans(input_path: &Path, output_url: &Path) {
         .write_header()
         .expect("Failed to write header");
     // filter init
-    let mut filter_ctx = FilterCtx::init_filter(&stream_ctx.dec_ctx);
+    let mut filter_ctx = FilterCtx::init_filter(&stream_ctx.dec_ctx, osd);
     // time gap init
     let mut time_gap = TimeGap::default();
 
     loop {
+        if let Ok(msg) = rx.try_recv() {
+            if msg.quit {
+                break;
+            }
+        } else {
+            println!("消息error")
+        }
+        //
+        // if let Ok(msg) = rx.recv() {
+        //     if msg.quit {
+        //         break;
+        //     }
+        // } else {
+        //     println!("消息error");
+        // }
         let mut packet = Packet::empty();
         match packet.read(&mut fmt_ctx.in_fmt_ctx) {
             Ok(_) => {}
@@ -103,24 +123,66 @@ fn ffmtrans(input_path: &Path, output_url: &Path) {
     }
 }
 
-async fn trans_handler(body: String, req: HttpRequest) -> HttpResponse {
-    println!("{body}{req:?}");
+#[derive(Deserialize, Debug)]
+struct OSDReq {
+    osd: String,
+}
+
+struct ThreadMsg {
+    quit: bool,
+}
+#[derive(Clone)]
+struct ThreadChannel {
+    tx: Sender<ThreadMsg>,
+    rx: Receiver<ThreadMsg>,
+    pre_thread: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+async fn trans_handler(data: Data<ThreadChannel>, body: web::Json<OSDReq>) -> HttpResponse {
+    let mut thread_guard = data.pre_thread.lock().unwrap();
+
+    if let Some(pre_thread) = thread_guard.take() {
+        println!("Some!!!");
+        data.tx
+            .send(ThreadMsg { quit: true })
+            .expect("send failed!!");
+        pre_thread.join().unwrap();
+    } else {
+        println!("None!!!");
+    }
+    // get rx
+    let rx = data.rx.clone();
+    let new_thread = thread::spawn(move || {
+        // Parse command line arguments
+        let args: Vec<String> = env::args().collect();
+        if args.len() != 3 {
+            panic!("Usage: ./rtsp_to_rtmp <rtsp://stream-url> <rtmp://stream-url>");
+        }
+        let input_path = Path::new(&args[1]);
+        let output_url = Path::new(&args[2]);
+        println!("&body.osd:{}", &body.osd);
+        // thread::sleep(std::time::Duration::from_secs(3));
+        ffmtrans(input_path, output_url, &body.osd, rx);
+    });
+    *thread_guard = Some(new_thread);
     HttpResponse::Ok().body("ok")
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Parse command line arguments
-    let args: Vec<String> = env::args().collect();
-    if args.len() != 3 {
-        panic!("Usage: ./rtsp_to_rtmp <rtsp://stream-url> <rtmp://stream-url>");
-    }
-    let input_path = Path::new(&args[1]);
-    let output_url = Path::new(&args[2]);
-
+    // thread init
+    let pre_thread: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    // message
+    let (tx, rx): (Sender<ThreadMsg>, Receiver<ThreadMsg>) = unbounded();
+    // threadChannel
+    let ThreadChannel = web::Data::new(ThreadChannel { tx, rx, pre_thread });
     // route
-    HttpServer::new(|| App::new().route("/setosd", web::post().to(trans_handler)))
-        .bind(("127.0.0.1", 3000))?
-        .run()
-        .await
+    HttpServer::new(move || {
+        App::new()
+            .app_data(ThreadChannel.clone())
+            .route("/setosd", web::post().to(trans_handler))
+    })
+    .bind(("127.0.0.1", 3000))?
+    .run()
+    .await
 }

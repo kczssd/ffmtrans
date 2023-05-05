@@ -9,3 +9,5 @@ edition = "2021"
 ffmpeg-next = "5.1.1"
 ffmpeg-sys-next = "5.1.1"
 actix-web = "4"
+serde = {version = "1.0.162",features = ["derive"]}
+crossbeam-channel = "0.5.8"

@@ -15,7 +15,7 @@ pub struct FilterCtx {
 }
 
 impl FilterCtx {
-    pub fn init_filter(dec_ctx: &decoder::video::Video) -> Self {
+    pub fn init_filter(dec_ctx: &decoder::video::Video, osd: &str) -> Self {
         // create filter graph
         let mut filter_graph = filter::Graph::new();
         // init filter context
@@ -41,10 +41,10 @@ impl FilterCtx {
         let parser = parser.output("in", 0).unwrap();
         let parser = parser.input("out", 0).unwrap();
         // filter description
-        let drawtext = "drawtext=fontcolor=red:fontsize=20:x=0:y=0:text=";
-        let date = "'%{localtime\\:%Y-%m-%d %H.%M.%S}'";
-        let drawtext = format!("{}{}", drawtext, date);
-        parser.parse(&drawtext).expect("Failed to parse drawtext");
+        // let drawtext = "drawtext=fontcolor=red:fontsize=20:x=0:y=0:text=";
+        // let date = "'%{localtime\\:%Y-%m-%d %H.%M.%S}'";
+        // let drawtext = format!("{}{}", drawtext, date);
+        parser.parse(osd).expect("Failed to parse drawtext");
         // connect filters
         filter_graph.validate().expect("Failed to connect filters");
         FilterCtx {
@@ -74,7 +74,7 @@ impl FilterCtx {
             match buffersink_ctx.frame(filter_frame) {
                 Ok(()) => {}
                 Err(e) => {
-                    println!("get frame failed from buffersink:{:?}", e);
+                    // println!("get frame failed from buffersink:{:?}", e);
                     break;
                 }
             };
