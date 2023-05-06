@@ -1,3 +1,4 @@
+use actix_cors::Cors;
 use actix_web::{web, App, HttpServer};
 use ffmtrans::serve::route::{trans_handler, ThreadChannel};
 
@@ -8,6 +9,7 @@ async fn main() -> std::io::Result<()> {
     // route init
     HttpServer::new(move || {
         App::new()
+            .wrap(Cors::default().allow_any_origin())
             .app_data(thread_channel.clone())
             .route("/setosd", web::post().to(trans_handler))
     })

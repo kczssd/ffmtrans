@@ -11,3 +11,4 @@ ffmpeg-sys-next = "5.1.1"
 actix-web = "4"
 serde = {version = "1.0.162",features = ["derive"]}
 crossbeam-channel = "0.5.8"
+actix-cors = "0.6.4"
