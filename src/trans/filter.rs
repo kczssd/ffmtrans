@@ -1,6 +1,6 @@
+use super::{ffmpeg::FmtCtx, sync::TimeGap};
 use std::ops::{Deref, DerefMut};
 
-use crate::{ffmpeg::FmtCtx, TimeGap};
 use ffmpeg_next::{
     decoder, encoder,
     filter::{self, Graph},
@@ -73,8 +73,8 @@ impl FilterCtx {
             let filter_frame = self.filter_frame.deref_mut();
             match buffersink_ctx.frame(filter_frame) {
                 Ok(()) => {}
-                Err(e) => {
-                    // println!("get frame failed from buffersink:{:?}", e);
+                Err(_) => {
+                    // println!("get frame failed from buffersink:{:?}");
                     break;
                 }
             };
@@ -92,7 +92,7 @@ impl FilterCtx {
         }
     }
 
-    pub fn encode_write_frame(
+    fn encode_write_frame(
         &mut self,
         enc_ctx: &mut encoder::Video,
         fmt_ctx: &mut FmtCtx,
