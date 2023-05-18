@@ -54,3 +54,16 @@ pub async fn trans_handler(data: Data<ThreadChannel>, body: web::Json<OSDReq>) -
     *thread_guard = Some(new_thread);
     HttpResponse::Ok().body("ok")
 }
+
+pub async fn close_handler(data: Data<ThreadChannel>) -> HttpResponse {
+    let mut thread_guard = data.pre_thread.lock().unwrap();
+
+    if let Some(pre_thread) = thread_guard.take() {
+        data.tx
+            .send(ThreadMsg { quit: true })
+            .expect("send failed!!");
+        pre_thread.join().unwrap();
+    }
+    *thread_guard = None;
+    HttpResponse::Ok().body("ok")
+}

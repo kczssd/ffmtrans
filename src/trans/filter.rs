@@ -41,9 +41,6 @@ impl FilterCtx {
         let parser = parser.output("in", 0).unwrap();
         let parser = parser.input("out", 0).unwrap();
         // filter description
-        // let drawtext = "drawtext=fontcolor=red:fontsize=20:x=0:y=0:text=";
-        // let date = "'%{localtime\\:%Y-%m-%d %H.%M.%S}'";
-        // let drawtext = format!("{}{}", drawtext, date);
         parser.parse(osd).expect("Failed to parse drawtext");
         // connect filters
         filter_graph.validate().expect("Failed to connect filters");

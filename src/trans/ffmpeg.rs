@@ -127,6 +127,7 @@ impl StreamCtx {
                     codec_ctx.set_gop(50);
                     codec_ctx.set_max_b_frames(0);
                     codec_ctx.set_format(Pixel::YUV420P);
+                    codec_ctx.set_bit_rate(2564 * 1000);
                     codec_ctx.set_time_base(Rational::new(
                         dec_ctx.frame_rate().unwrap().denominator(),
                         dec_ctx.frame_rate().unwrap().numerator(),

@@ -1,18 +1,11 @@
 use std::io;
 
 use actix_cors::Cors;
-use actix_web::{http, middleware, web, App, HttpResponse, HttpServer};
-use ffmtrans::serve::route::{trans_handler, ThreadChannel};
+use actix_web::{http, web, App, HttpResponse, HttpServer};
+use ffmtrans::serve::route::{close_handler, trans_handler, ThreadChannel};
 
 async fn preflight() -> io::Result<HttpResponse> {
-    Ok(HttpResponse::Ok()
-        .append_header(("Access-Control-Allow-Origin", "*"))
-        .append_header(("Access-Control-Allow-Methods", "POST, OPTIONS"))
-        .append_header((
-            "Access-Control-Allow-Headers",
-            "Content-Type, x-requested-with",
-        ))
-        .finish())
+    Ok(HttpResponse::Ok().finish())
 }
 
 #[actix_web::main]
@@ -32,6 +25,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(thread_channel.clone())
             .route("/setosd", web::post().to(trans_handler))
             .route("/setosd", web::method(http::Method::OPTIONS).to(preflight))
+            .route("/close", web::get().to(close_handler))
     })
     .bind(("127.0.0.1", 3000))?
     .run()

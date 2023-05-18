@@ -38,6 +38,7 @@ pub fn ffmtrans_with_filter(osd: &str, rx: Receiver<ThreadMsg>) {
     loop {
         if let Ok(msg) = rx.try_recv() {
             if msg.quit {
+                println!("system quit.");
                 break;
             }
         }
@@ -128,6 +129,7 @@ pub fn ffmtrans_remux(rx: Receiver<ThreadMsg>) {
     loop {
         if let Ok(msg) = rx.try_recv() {
             if msg.quit {
+                println!("system quit.");
                 break;
             }
         }
